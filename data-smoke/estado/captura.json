@@ -1,0 +1,42 @@
+{
+  "versao" : 1,
+  "watermarkContratacoes" : null,
+  "inicioBackfillContratos" : "2026-08-13",
+  "watermarkContratos" : {
+    "02928213000103/1" : "2026-11-12",
+    "25108291000167/1" : "2026-11-12",
+    "25108291000167/2" : "2026-11-12"
+  },
+  "unidadesCaptura" : {
+    "contratos/cnpj=02928213000103/unidade=1/janela=20260813-20261112" : {
+      "status" : "OK",
+      "tentativas" : 1,
+      "atualizadoEm" : "2026-11-13T17:53:47.427458012Z",
+      "dataCaptura" : "2026-11-13",
+      "paginas" : 1,
+      "registros" : 23,
+      "caminho" : "bronze/metadados/contratos/data_captura=2026-11-13/cnpj=02928213000103/unidade=1/janela=20260813-20261112",
+      "erro" : null
+    },
+    "contratos/cnpj=25108291000167/unidade=1/janela=20260813-20261112" : {
+      "status" : "VAZIA",
+      "tentativas" : 1,
+      "atualizadoEm" : "2026-11-13T17:53:18.114719314Z",
+      "dataCaptura" : "2026-11-13",
+      "paginas" : 0,
+      "registros" : 0,
+      "caminho" : null,
+      "erro" : null
+    },
+    "contratos/cnpj=25108291000167/unidade=2/janela=20260813-20261112" : {
+      "status" : "OK",
+      "tentativas" : 1,
+      "atualizadoEm" : "2026-11-13T17:53:41.112076427Z",
+      "dataCaptura" : "2026-11-13",
+      "paginas" : 1,
+      "registros" : 3,
+      "caminho" : "bronze/metadados/contratos/data_captura=2026-11-13/cnpj=25108291000167/unidade=2/janela=20260813-20261112",
+      "erro" : null
+    }
+  }
+}
