@@ -9,6 +9,12 @@ public final class Recursos {
     if (Contratacoes.NOME.equals(nome)) {
       return new Contratacoes();
     }
+    if (Unidades.NOME.equals(nome)) {
+      return new Unidades();
+    }
+    if (Contratos.NOME.equals(nome)) {
+      return new Contratos();
+    }
     throw new ConfigInvalida("Recurso desconhecido: " + nome);
   }
 }
