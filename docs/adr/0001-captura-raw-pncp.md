@@ -3,6 +3,7 @@
 - Status: Proposto
 - Data: 2026-11-09
 - Revisão: 2026-11-12 (escopo inicial só com contratações e contratos por data de publicação; contratos filtrados por unidade)
+- Revisão: 2026-11-16 (contratos por varredura nacional por dia, com seleção local de GO; o catálogo deixa de ser pré-requisito dos contratos; intervalo mínimo entre requisições)
 
 ## Contexto
 
@@ -46,9 +47,9 @@ Restrições: máquina local, um único mantenedor, frescor diário do dado (o m
 ### Fases
 
 1. **Contratações.** `contratacoes/publicacao` com `uf=GO`, por modalidade.
-2. **Catálogo de unidades.** Lê o bronze de contratações, extrai os CNPJs distintos e consulta `/api/pncp/v1/orgaos/{cnpj}/unidades` para cada um. Guarda a resposta bruta e seleciona as unidades com `municipio.uf.siglaUF = GO`, gravando o catálogo `(cnpj, codigoUnidade, nomeUnidade, UF, IBGE, statusAtivo)`. As unidades de uma cidade são as linhas do catálogo com aquele IBGE. O catálogo é cumulativo entre runs.
-3. **Contratos.** `contratos` por `(cnpjOrgao, codigoUnidadeAdministrativa)` do catálogo. Não há varredura nacional.
-4. **Fila de arquivos.** Lê o bronze de contratações e contratos e grava a fila `(tipo, cnpj, ano, seq, UF, IBGE, codigoUnidade)`. É seleção, não transformação de prata.
+2. **Catálogo de unidades.** Lê o bronze de contratações, extrai os CNPJs distintos e consulta `/api/pncp/v1/orgaos/{cnpj}/unidades` para cada um. Guarda a resposta bruta e seleciona as unidades com `municipio.uf.siglaUF = GO`, gravando o catálogo `(cnpj, codigoUnidade, nomeUnidade, UF, IBGE, statusAtivo)`. As unidades de uma cidade são as linhas do catálogo com aquele IBGE. O catálogo é cumulativo entre runs. É dado de referência: nenhuma outra fase depende dele.
+3. **Contratos.** `contratos` sem filtro de órgão nem de local, por dia de publicação: varredura nacional. O bronze guarda a resposta nacional inteira; a seleção de GO é local, por `unidadeOrgao.ufSigla`.
+4. **Fila de arquivos.** Lê o bronze de contratações e contratos, seleciona os registros de GO e grava a fila `(tipo, cnpj, ano, seq, UF, IBGE, codigoUnidade)`. É seleção, não transformação de prata.
 5. **Arquivos.** 5a: lista arquivos por item da fila e faz `HEAD` em cada um, somando bytes. 5b: baixa, somente se a estimativa couber no disco (~50 GB).
 
 ### Unidade de captura e idempotência
@@ -56,22 +57,22 @@ Restrições: máquina local, um único mantenedor, frescor diário do dado (o m
 - Unidades idempotentes; cada uma pode ser refeita sozinha:
   - contratações: `(contratacoes, dia, modalidade)`;
   - catálogo: `(unidades, cnpj)`;
-  - contratos: `(contratos, janela, cnpj, codigoUnidade)`. A janela é a do run: os 3 meses numa única consulta no backfill; do watermark menos a sobreposição até hoje no incremental. Unidade por dia multiplicaria as requisições por 90 no backfill.
+  - contratos: `(contratos, dia)`. Sem filtro e com janela de 1 dia, a página de 500 responde em ~1 s; com janela de 3 meses, em 8 a 38 s (fatos de 2026-11-12 e 2026-11-16).
 - Snapshot imutável e datado; nada é sobrescrito nem removido localmente.
 
 ### Incremental
 - Janela deslizante por data de publicação (`contratacoes/publicacao` e `contratos`), com watermark persistido e sobreposição de 1 a 2 dias para cobrir atrasos de publicação.
 - Sem `/atualizacao`, alterações posteriores à publicação em registros já capturados não são recapturadas.
-- O watermark de contratos é por par `(cnpj, codigoUnidade)`: um par que entra no catálogo depois é capturado desde o início do backfill.
+- Um watermark por recurso.
 
 ### Robustez
-- Concorrência de 2 a 4 requisições.
+- Concorrência de 1 a 4 requisições, com intervalo mínimo entre requisições por API (`/api/consulta` e `/api/pncp`). Um 429 pausa todas as requisições àquela API.
 - Retry com backoff exponencial e jitter em 429 e 5xx.
 - 204 é "unidade vazia" e fica registrada como tal; não é erro.
 - Falha persistente: a unidade é marcada como `FALHA` e o run segue. O run seguinte reprocessa só as unidades com falha.
 
 ### Estado
-- **Arquivo de estado** (JSON), sem banco. Contém, por unidade: status (`PENDENTE|OK|VAZIA|FALHA`), tentativas, timestamp e caminho do bronze gerado; e os watermarks (por recurso em contratações, por par `(cnpj, codigoUnidade)` em contratos).
+- **Arquivo de estado** (JSON), sem banco. Contém, por unidade: status (`PENDENTE|OK|VAZIA|FALHA`), tentativas, timestamp e caminho do bronze gerado; e os watermarks, um por recurso.
 - **Escritor único**: as threads de captura reportam o resultado a um coordenador; só ele escreve o arquivo.
 - Escrita atômica: grava em arquivo temporário, `fsync` e `rename`.
 - Se o volume de unidades tornar o arquivo único incômodo, reavaliar SQLite em outro ADR.
@@ -104,17 +105,17 @@ bronze/manifesto/arquivos.parquet
 
 - Positivas: replay sem depender da API; unidades refazíveis; localização presente em todo documento; sem serviços para manter.
 - Negativas: duas toolchains para um único mantenedor; o arquivo de estado único exige escritor único.
-- Negativas do filtro por unidade: os contratos dependem do catálogo, então um órgão sem contratação publicada na janela observada não entra e seus contratos não são capturados; o número de requisições passa a ser proporcional ao número de pares `(cnpj, codigoUnidade)`, não ao volume de dados. A varredura nacional custaria ~1.083 páginas no backfill e ~12 por dia; só o Estado de Goiás tem 440 pares.
+- Negativas da varredura nacional de contratos: o bronze guarda contratos de todo o país (~76 KB em gzip por página de 500, ~1.100 páginas nos 3 meses); a seleção de GO depende de `unidadeOrgao.ufSigla` vir preenchido no registro.
 - Negativa de adiar `/atualizacao`: retificações e mudanças de situação não chegam ao bronze.
-- Riscos: 429 em carga baixa pode alongar o backfill; espaço dos PDFs ainda não medido; com milhares de pares, o incremental diário faz milhares de requisições (a maioria 204) e o arquivo de estado cresce no mesmo ritmo, o que antecipa a reavaliação de SQLite.
+- Riscos: 429 em carga baixa pode alongar o backfill; o espaço dos PDFs só foi estimado por amostra (~100 GB, fatos de 2026-11-16), acima dos ~50 GB previstos.
 
 ## Em aberto
 
 1. **Espaço em disco dos PDFs.** Só a etapa 5a (listagem + `HEAD`) responde se ~50 GB bastam.
 2. **Lista válida de modalidades de contratação.** Há códigos que devolvem 204 (2 e 14). Decidir se o job usa lista fixa ou descobre dinamicamente.
 3. **Política de 429.** Verificar se a API envia `Retry-After`; ainda não observado.
-4. **Tamanho do catálogo de GO.** O número de pares `(cnpj, codigoUnidade)` não foi medido; o backfill de contratações mais a fase 2 respondem. Se for inviável consultar por par, as alternativas são consultar só por `cnpjOrgao` quando todas as unidades do órgão estão em GO, ou voltar à varredura nacional com seleção local.
-5. **Cobertura do catálogo.** Medir quantos contratos de GO pertencem a órgãos que não publicaram contratação na janela observada.
+4. **Tamanho do catálogo de GO.** Resolvido em 2026-11-16: 4.828 pares (fatos de 2026-11-13). Por par, o backfill de contratos custaria ~15 h e o incremental ~4.800 requisições por dia; os contratos passaram à varredura nacional por dia.
+5. **Cobertura do catálogo.** Não se aplica desde 2026-11-16: os contratos não dependem mais do catálogo.
 6. **Atas (adiado): janela.** `/atas` filtra por vigência e `/atas/atualizacao` por atualização global. Definir qual usar no backfill e qual no incremental quando atas entrarem no escopo.
 
 ## Fatos medidos na API (2026-11-13)
@@ -129,3 +130,17 @@ Backfill real de contratações (publicação de 2026-08-13 a 2026-11-12, `uf=GO
 - **429 em `contratacoes/publicacao`:** a API não enviou `Retry-After` em nenhuma das 3.329 linhas de log com 429 (uma linha por tentativa, somando todos os runs). O limite parece ser de taxa: com `curl` sequencial, 12 requisições em 50 s passaram sem 429; com dois fluxos paralelos, as primeiras 5 a 6 requisições em ~10 s passaram e as seguintes receberam 429 em ~0,1 s. A recuperação levou cerca de 1,5 a 2 min sem requisições.
 - **Efeito no backfill:** nos primeiros 40 min (latência de ~30 s por requisição), dois fluxos avançaram a ~6 unidades por minuto sem 429. Depois, com `curl` medindo 0,7 a 10 s por requisição, o mesmo cliente passou a receber 429 em sequência, esgotou as 6 tentativas e marcou `FALHA` (143 em 13 min com concorrência 3; 378 em 50 min com concorrência 2). [INFERÊNCIA] A latência menor elevou a taxa acima do limite. Reiniciar o processo após 4 ou 15 min de pausa também recebeu 429 em menos de 40 s. O que funcionou foi limitar o processo, de fora, alternando `SIGSTOP`/`SIGCONT` (3 s ativo, 12 s parado): o run que concluiu o backfill levou 2 h 17 min, a 6 a 7 unidades por minuto, com 31 respostas 429 no log. A captura não tem como configurar um intervalo mínimo entre requisições, e a concorrência mínima aceita é 2.
 - **Duração total:** 5 h 22 min de relógio (08:52 a 14:15), dos quais 2 h 17 min no run que concluiu o backfill de contratações; o restante foi gasto em runs interrompidos por 429, em pausas e em sondagens com `curl`.
+
+## Fatos medidos na API (2026-11-16)
+
+Sondagem com `curl` sequencial, uma conexão TCP nova por requisição.
+
+- **`contratos` sem filtro, janela de 1 dia, `tamanhoPagina=500`:** 2026-11-10: 9.115 registros em 19 páginas; página 1 em 1,1 s (832 KB; 76 KB em gzip), página 19 em 0,2 s. 2026-09-01: 8.207 registros em 17 páginas; página 3 em 1,7 s. 2026-11-08 (domingo): 30 registros, 0,6 s. Nenhum dos 1.145 registros lidos veio sem `unidadeOrgao.ufSigla`.
+- **GO não se distribui por igual entre as páginas:** em 2026-11-10, 26 dos 500 registros da página 1 são de GO; na página 19, 113 de 115. A estimativa de 4,3% de 2026-11-09 (5 páginas) não é confiável.
+- **`contratos` por par, janela de 3 meses:** 13,8 s (23 registros) e 8,1 s (204). Só com `cnpjOrgao`: 12,6 s. Por par com janela de 3 dias: 0,6 s (204).
+- **Listagem de arquivos:** `GET /api/pncp/v1/orgaos/{cnpj}/{compras|contratos}/{ano}/{seq}/arquivos` responde em 0,1 a 0,15 s com um array. Campos: `uri`, `url`, `cnpj`, `anoCompra`, `sequencialCompra`, `dataPublicacaoPncp`, `sequencialDocumento`, `titulo`, `tipoDocumentoNome`; em compras, também `statusAtivo`, `tipoDocumentoId` e `tipoDocumentoDescricao`. Não traz tamanho. `titulo` não tem extensão. `uri` e `url` apontam para `/pncp-api/v1/...`, que responde igual a `/api/pncp/v1/...`.
+- **Arquivo:** `HEAD .../arquivos/{seqDoc}` devolve 200 em 0,1 a 0,2 s com `content-length`, `content-disposition: attachment; filename="..."` (com extensão) e `accept-ranges: bytes`. O `GET` vem com `Transfer-Encoding: chunked`, sem `content-length`; com `Range: bytes=0-0` devolve 206 e `content-range`.
+- **404 com corpo JSON** para item inexistente ("Contrato não cadastrado") e para documento inexistente ("Documento não encontrado").
+- **Amostra de documentos:** 60 contratações sorteadas do bronze (59 listadas) e os 26 contratos do smoke (16 listados, de 2 órgãos). Contratações: 249 documentos, 4,2 por item (máximo 21; modalidade 4: 10,2 em 5 itens), nenhum item sem documento. Nos 244 `HEAD` com 200: 252 MB, média de 1,03 MB, mediana de 0,21 MB, percentil 90 de 1,6 MB, máximo de 30 MB (um `.zip`). Contratos: 1 documento por item; nos 15 `HEAD` com 200: 1,9 MB, média de 0,13 MB. Extensões nos 259 `HEAD`: 252 `pdf`, 6 `zip`, 1 `xls`.
+- **Projeção de espaço.** [INFERÊNCIA] 24.826 contratações × 4,2 ≈ 105 mil documentos e ≈ 108 GB, só de contratações. A amostra é pequena e de cauda pesada: um único arquivo responde por 12% dos bytes.
+- **Conexões recusadas em `/api/pncp`:** depois de cerca de 220 requisições a ~2 por segundo, 17 das 52 seguintes falharam em ~10 ms com "Couldn't connect to server", sem 429. Houve 8 requisições a `/api/consulta` no mesmo período; a influência delas não foi isolada.
